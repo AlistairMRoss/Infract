@@ -69,6 +69,9 @@ function reportExplain(result) {
             }
         }
         for (const ref of fn.referencedResources) {
+            // Skip SST built-in globals (always available)
+            if (SST_BUILTINS.has(ref.resourceName))
+                continue;
             const isLinked = fn.linkedResources.some((l) => l === ref.resourceName || l.toLowerCase() === ref.resourceName.toLowerCase());
             if (isLinked) {
                 console.log(chalk.green(`    Line ${ref.lineNumber}: Resource.${ref.resourceName}.${ref.property} LINKED`));
@@ -125,6 +128,8 @@ function violationTitle(type) {
         default: return type;
     }
 }
+/** SST built-in Resource properties always available without linking. */
+const SST_BUILTINS = new Set(["App"]);
 function matchActionSimple(pattern, action) {
     if (pattern === "*" || pattern === action)
         return true;

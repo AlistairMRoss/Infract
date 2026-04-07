@@ -1,54 +1,100 @@
 import ts from "typescript";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
 import { lookupCommand } from "./patterns.js";
-/** Scan a compute resource's source code for AWS SDK calls and Resource.X references. */
+/** Scan a compute resource's source code for AWS SDK calls and Resource.X references.
+ *  Follows local imports recursively to find SDK calls in service/lib modules. */
 export function scanFunction(projectRoot, resource) {
-    const filePath = resolveHandlerPath(projectRoot, resource.handler);
-    if (!filePath)
+    const entryPath = resolveHandlerPath(projectRoot, resource.handler);
+    if (!entryPath)
         return { sdkCalls: [], resourceRefs: [] };
-    return scanFile(filePath);
+    // Collect all local files reachable from the handler
+    const files = collectLocalImports(entryPath);
+    const allCalls = [];
+    const allRefs = [];
+    for (const file of files) {
+        const result = scanFile(file);
+        allCalls.push(...result.sdkCalls);
+        allRefs.push(...result.resourceRefs);
+    }
+    return {
+        sdkCalls: deduplicateCalls(allCalls),
+        resourceRefs: deduplicateRefs(allRefs),
+    };
 }
 /** Resolve a Lambda handler reference to an actual file path. */
 function resolveHandlerPath(root, handler) {
     if (!handler)
         return null;
-    // Strip the export name after the last dot: "src/email.handler" -> "src/email"
     const lastDot = handler.lastIndexOf(".");
     const modulePath = lastDot !== -1 ? handler.slice(0, lastDot) : handler;
+    return resolveModulePath(resolve(root, modulePath));
+}
+/** Try to resolve a module path to an actual file. */
+function resolveModulePath(base) {
     const extensions = [".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
     for (const ext of extensions) {
-        const candidate = resolve(root, modulePath + ext);
+        const candidate = base + ext;
         if (existsSync(candidate))
             return candidate;
     }
-    // Try as directory with index file
     for (const ext of extensions) {
-        const candidate = resolve(root, modulePath, "index" + ext);
+        const candidate = resolve(base, "index" + ext);
         if (existsSync(candidate))
             return candidate;
     }
+    if (existsSync(base))
+        return base;
     return null;
 }
-/** Scan a single file using the TypeScript compiler API. */
+/** Recursively collect all local files imported from the entry file. */
+function collectLocalImports(entryPath) {
+    const visited = new Set();
+    const queue = [entryPath];
+    while (queue.length > 0) {
+        const file = queue.pop();
+        if (visited.has(file))
+            continue;
+        visited.add(file);
+        let source;
+        try {
+            source = readFileSync(file, "utf-8");
+        }
+        catch {
+            continue;
+        }
+        const sf = ts.createSourceFile(file, source, ts.ScriptTarget.ESNext, true);
+        ts.forEachChild(sf, (node) => {
+            if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+                const specifier = node.moduleSpecifier.text;
+                // Only follow relative imports (local project files)
+                if (specifier.startsWith(".")) {
+                    const resolved = resolveModulePath(resolve(dirname(file), specifier));
+                    if (resolved && !resolved.includes("node_modules")) {
+                        queue.push(resolved);
+                    }
+                }
+            }
+        });
+    }
+    return [...visited];
+}
+/** Scan a single file for SDK calls and Resource.X references. */
 function scanFile(filePath) {
-    const program = ts.createProgram([filePath], {
-        target: ts.ScriptTarget.ESNext,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        allowJs: true,
-        noEmit: true,
-        skipLibCheck: true,
-    });
-    const sourceFile = program.getSourceFile(filePath);
-    if (!sourceFile)
+    let source;
+    try {
+        source = readFileSync(filePath, "utf-8");
+    }
+    catch {
         return { sdkCalls: [], resourceRefs: [] };
+    }
+    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.ESNext, true);
     const sdkCalls = [];
     const resourceRefs = [];
     // Track which command names are imported from AWS SDK packages
     const importedCommands = new Set();
     // First pass: collect AWS SDK imports
-    ts.forEachChild(sourceFile, (node) => {
+    ts.forEachChild(sf, (node) => {
         if (ts.isImportDeclaration(node)) {
             const moduleSpecifier = node.moduleSpecifier;
             if (ts.isStringLiteral(moduleSpecifier)) {
@@ -75,7 +121,7 @@ function scanFile(filePath) {
             if (importedCommands.has(commandName)) {
                 const pattern = lookupCommand(commandName);
                 if (pattern) {
-                    const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+                    const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
                     for (const action of pattern.requiredActions) {
                         sdkCalls.push({
                             service: pattern.service,
@@ -95,7 +141,7 @@ function scanFile(filePath) {
             node.expression.expression.text === "Resource") {
             const resourceName = node.expression.name.text;
             const property = node.name.text;
-            const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+            const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
             resourceRefs.push({
                 resourceName,
                 property,
@@ -105,11 +151,8 @@ function scanFile(filePath) {
         }
         ts.forEachChild(node, visit);
     }
-    ts.forEachChild(sourceFile, visit);
-    return {
-        sdkCalls: deduplicateCalls(sdkCalls),
-        resourceRefs: deduplicateRefs(resourceRefs),
-    };
+    ts.forEachChild(sf, visit);
+    return { sdkCalls, resourceRefs };
 }
 function deduplicateCalls(calls) {
     const seen = new Set();

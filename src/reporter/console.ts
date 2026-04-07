@@ -80,6 +80,9 @@ function reportExplain(result: AnalysisResult): void {
     }
 
     for (const ref of fn.referencedResources) {
+      // Skip SST built-in globals (always available)
+      if (SST_BUILTINS.has(ref.resourceName)) continue;
+
       const isLinked = fn.linkedResources.some(
         (l) => l === ref.resourceName || l.toLowerCase() === ref.resourceName.toLowerCase(),
       );
@@ -149,6 +152,9 @@ function violationTitle(type: string): string {
     default: return type;
   }
 }
+
+/** SST built-in Resource properties always available without linking. */
+const SST_BUILTINS = new Set(["App"]);
 
 function matchActionSimple(pattern: string, action: string): boolean {
   if (pattern === "*" || pattern === action) return true;

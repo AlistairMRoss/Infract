@@ -19,14 +19,27 @@ export function parseSSTProject(projectRoot) {
     }
     const project = {
         resources: new Map(),
+        varToResource: new Map(),
         projectRoot,
     };
+    // Track config variable objects (e.g., const envAndPermissions = { permissions: [...] })
+    const configVars = new Map();
+    // Track array variables (e.g., const allLinkables = [...allTables, ...allQueues])
+    const arrayVars = new Map();
     // Collect all TS files reachable from the config
     const filesToParse = collectInfraFiles(configPath, projectRoot);
-    // Parse each file for SST resource definitions
+    // First pass: parse all files to discover resources, variable mappings, and config vars
     for (const file of filesToParse) {
-        parseFile(file, project);
+        parseFile(file, project, configVars, arrayVars);
     }
+    // Resolve array variable spreads (allLinkables = [...allTables, ...allQueues])
+    resolveArrayVars(arrayVars);
+    // Second pass: resolve spread references using collected config vars
+    resolveSpreadRefs(project, configVars);
+    // Third pass: resolve link spread references (e.g., ...allLinkables) to actual resource names
+    resolveAllLinkSpreads(project, arrayVars);
+    // Fourth pass: resolve link variable names to SST resource names
+    resolveAllLinks(project);
     return project;
 }
 function findSSTConfig(root) {
@@ -53,6 +66,12 @@ function collectInfraFiles(configPath, projectRoot) {
         ts.forEachChild(sf, (node) => {
             // Static imports: import { x } from './infra/foo'
             if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+                const resolved = resolveImportPath(node.moduleSpecifier.text, file, projectRoot);
+                if (resolved)
+                    queue.push(resolved);
+            }
+            // Re-exports: export * from './foo', export { x } from './foo'
+            if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
                 const resolved = resolveImportPath(node.moduleSpecifier.text, file, projectRoot);
                 if (resolved)
                     queue.push(resolved);
@@ -86,12 +105,15 @@ function walkForDynamicImports(node, currentFile, projectRoot, queue) {
     });
 }
 function resolveImportPath(specifier, fromFile, projectRoot) {
-    // Only follow relative imports (not npm packages)
+    // Only follow relative imports (not npm packages, not node_modules)
     if (!specifier.startsWith(".") && !specifier.startsWith("/"))
         return null;
     const base = specifier.startsWith("/")
         ? resolve(projectRoot, specifier)
         : resolve(dirname(fromFile), specifier);
+    // Skip SST platform internals and node_modules
+    if (base.includes("node_modules") || base.includes(".sst/platform"))
+        return null;
     const extensions = [".ts", ".tsx", ".js", ".jsx"];
     // Try direct path
     for (const ext of extensions) {
@@ -111,13 +133,13 @@ function resolveImportPath(specifier, fromFile, projectRoot) {
     return null;
 }
 /** Parse a single file for SST resource definitions. */
-function parseFile(filePath, project) {
+function parseFile(filePath, project, configVars, arrayVars) {
     const source = safeReadFile(filePath);
     if (!source)
         return;
     const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.ESNext, true);
-    // Track variable names -> resource names for link resolution
-    const varToResource = new Map();
+    // Use project-wide variable-to-resource mapping
+    const varToResource = project.varToResource;
     function visit(node) {
         // Detect: new sst.aws.X("Name", { ... })
         if (ts.isNewExpression(node) && isSST(node.expression)) {
@@ -160,6 +182,18 @@ function parseFile(filePath, project) {
                 varToResource.set(node.parent.name.text, name);
             }
         }
+        // Detect: const varName = someFactory('ResourceName', ...)
+        // Handles patterns like: const billingAccountTable = createTableLinkable('ExternalBillingAccount', ...)
+        if (ts.isCallExpression(node) &&
+            ts.isIdentifier(node.expression) &&
+            node.arguments.length > 0 &&
+            ts.isStringLiteral(node.arguments[0]) &&
+            ts.isVariableDeclaration(node.parent) &&
+            ts.isIdentifier(node.parent.name)) {
+            const varName = node.parent.name.text;
+            const firstArg = node.arguments[0];
+            varToResource.set(varName, firstArg.text);
+        }
         // Detect: api.route("GET /path", "handler.handler", { ... })
         if (ts.isCallExpression(node) &&
             ts.isPropertyAccessExpression(node.expression) &&
@@ -178,12 +212,208 @@ function parseFile(filePath, project) {
             node.expression.text === "addAuthRoute") {
             parseAddAuthRouteCall(node, sf, filePath, project, varToResource);
         }
+        // Detect: const varName = { permissions: [...], link: [...], transform: {...} }
+        // Captures config objects like envAndPermissions, crossAccountTransform
+        if (ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer &&
+            ts.isObjectLiteralExpression(node.initializer)) {
+            const varName = node.name.text;
+            const config = extractConfigFromObject(node.initializer);
+            if (config.permissions.length > 0 || config.links.length > 0 || config.spreadRefs.length > 0) {
+                configVars.set(varName, config);
+            }
+        }
+        // Detect: const allTables = [table1, table2, ...otherArray]
+        // Captures array variables used in link: allLinkables
+        if (ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.initializer &&
+            ts.isArrayLiteralExpression(node.initializer)) {
+            const varName = node.name.text;
+            const elements = [];
+            for (const el of node.initializer.elements) {
+                if (ts.isIdentifier(el)) {
+                    elements.push(el.text);
+                }
+                else if (ts.isSpreadElement(el) && ts.isIdentifier(el.expression)) {
+                    elements.push(`...${el.expression.text}`);
+                }
+            }
+            if (elements.length > 0) {
+                arrayVars.set(varName, elements);
+            }
+        }
         ts.forEachChild(node, visit);
     }
     ts.forEachChild(sf, visit);
 }
+/** Extract permissions, links, and spread refs from a plain object literal. */
+function extractConfigFromObject(obj) {
+    const result = {
+        permissions: [],
+        links: [],
+        spreadRefs: [],
+    };
+    for (const prop of obj.properties) {
+        if (ts.isSpreadAssignment(prop) && ts.isIdentifier(prop.expression)) {
+            result.spreadRefs.push(prop.expression.text);
+            continue;
+        }
+        if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name))
+            continue;
+        if (prop.name.text === "permissions") {
+            result.permissions.push(...extractPermissions(prop.initializer));
+        }
+        if (prop.name.text === "link") {
+            result.links.push(...extractLinkNames(prop.initializer));
+        }
+        // Recurse into nested objects like transform: { route: { handler: { ...envAndPermissions } } }
+        if (prop.name.text === "transform" || prop.name.text === "route" || prop.name.text === "handler") {
+            if (ts.isObjectLiteralExpression(prop.initializer)) {
+                const nested = extractConfigFromObject(prop.initializer);
+                result.permissions.push(...nested.permissions);
+                result.links.push(...nested.links);
+                result.spreadRefs.push(...nested.spreadRefs);
+            }
+        }
+    }
+    return result;
+}
+/**
+ * Resolve spread references on resources using collected config variables.
+ * e.g., ...crossAccountTransform -> extracts permissions from that variable.
+ */
+function resolveSpreadRefs(project, configVars) {
+    // First resolve config vars that reference other config vars (one level deep)
+    for (const [name, config] of configVars) {
+        if ('spreadRefs' in config) {
+            const refs = config.spreadRefs;
+            for (const ref of refs) {
+                const refConfig = configVars.get(ref);
+                if (refConfig) {
+                    config.permissions.push(...refConfig.permissions);
+                    config.links.push(...refConfig.links);
+                }
+            }
+        }
+    }
+    // Now resolve spreads on resources
+    for (const resource of project.resources.values()) {
+        if (!resource._spreadRefs)
+            continue;
+        for (const ref of resource._spreadRefs) {
+            const config = configVars.get(ref);
+            if (config) {
+                resource.permissions.push(...config.permissions);
+                resource.links.push(...config.links);
+            }
+        }
+        delete resource._spreadRefs;
+    }
+    // Re-inherit: routes/subscribers created before spread resolution need updated parent data
+    for (const resource of project.resources.values()) {
+        if (resource.parentApi) {
+            const parentApi = project.resources.get(resource.parentApi);
+            if (parentApi) {
+                // Add any parent permissions not already present
+                for (const perm of parentApi.permissions) {
+                    const already = resource.permissions.some((p) => JSON.stringify(p) === JSON.stringify(perm));
+                    if (!already)
+                        resource.permissions.push(perm);
+                }
+                // Add any parent links not already present
+                for (const link of parentApi.links) {
+                    if (!resource.links.includes(link))
+                        resource.links.push(link);
+                }
+            }
+        }
+    }
+}
+/**
+ * After all files are parsed, resolve link variable names to SST resource logical names.
+ * e.g., link: [billingAccountTable] where billingAccountTable maps to SST name "ExternalBillingAccount"
+ */
+/**
+ * Resolve array variable spreads: allLinkables = [...allTables, ...allQueues]
+ * Expands spread references within array vars so each contains flat element lists.
+ */
+function resolveArrayVars(arrayVars) {
+    // Multiple passes to handle nested spreads (allLinkables -> allTables -> individual vars)
+    for (let i = 0; i < 3; i++) {
+        for (const [name, elements] of arrayVars) {
+            const expanded = [];
+            for (const el of elements) {
+                if (el.startsWith("...")) {
+                    const refName = el.slice(3);
+                    const refElements = arrayVars.get(refName);
+                    if (refElements) {
+                        expanded.push(...refElements);
+                    }
+                    else {
+                        expanded.push(el); // Keep unresolved
+                    }
+                }
+                else {
+                    expanded.push(el);
+                }
+            }
+            arrayVars.set(name, expanded);
+        }
+    }
+}
+/**
+ * Expand link spread references (e.g., ...allLinkables) to individual resource variable names.
+ */
+function resolveAllLinkSpreads(project, arrayVars) {
+    for (const resource of project.resources.values()) {
+        const expanded = [];
+        for (const link of resource.links) {
+            if (link.startsWith("...")) {
+                const arrayName = link.slice(3);
+                const elements = arrayVars.get(arrayName);
+                if (elements) {
+                    expanded.push(...elements);
+                }
+                else {
+                    expanded.push(link); // Keep unresolved
+                }
+            }
+            else {
+                expanded.push(link);
+            }
+        }
+        resource.links = expanded;
+    }
+}
+function resolveAllLinks(project) {
+    for (const resource of project.resources.values()) {
+        resource.links = resource.links.map((varName) => {
+            // Skip spread references
+            if (varName.startsWith("..."))
+                return varName;
+            // Try to resolve variable name to SST resource name
+            const resourceName = project.varToResource.get(varName);
+            if (resourceName)
+                return resourceName;
+            // Already a resource name
+            return varName;
+        });
+    }
+}
 function parseResourceConfig(obj, resource, sf) {
     for (const prop of obj.properties) {
+        // Handle spread properties: ...crossAccountTransform, ...envAndPermissions
+        if (ts.isSpreadAssignment(prop)) {
+            // We can't resolve the spread value statically, but we track it
+            // so resolveAllSpreads can handle it later
+            if (ts.isIdentifier(prop.expression)) {
+                resource._spreadRefs = resource._spreadRefs ?? [];
+                resource._spreadRefs.push(prop.expression.text);
+            }
+            continue;
+        }
         if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name))
             continue;
         const key = prop.name.text;
@@ -200,7 +430,6 @@ function parseResourceConfig(obj, resource, sf) {
                 resource.permissions.push(...extractPermissions(prop.initializer));
                 break;
             case "transform":
-                // Extract permissions and links from transform.route.handler
                 extractTransformConfig(prop.initializer, resource);
                 break;
         }
@@ -219,6 +448,10 @@ function extractLinkNames(node) {
                 names.push(`...${el.expression.text}`);
             }
         }
+    }
+    else if (ts.isIdentifier(node)) {
+        // link: allLinkables — single variable reference to an array
+        names.push(`...${node.text}`);
     }
     return names;
 }

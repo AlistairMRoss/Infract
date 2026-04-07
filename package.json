@@ -1,12 +1,12 @@
 {
-  "name": "can-it-deploy-iac",
-  "version": "0.2.0",
+  "name": "infract",
+  "version": "0.7.0",
   "description": "Detect permission and linking gaps in SST/Pulumi projects before deployment",
   "author": "alistairmross",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "can-it-deploy": "dist/cli.js"
+    "infract": "dist/cli.js"
   },
   "files": [
     "dist"

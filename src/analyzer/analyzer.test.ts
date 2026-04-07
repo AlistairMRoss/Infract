@@ -1,30 +1,34 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import { parseSSTProject } from "../graph/parser.js";
-import { analyze } from "./analyzer.js";
+import { analyze, type AnalysisResult } from "./analyzer.js";
+import type { SSTProject } from "../graph/types.js";
 
 const flussRoot = "/home/alist/Work/FlussDashBoard/FlussV3";
 
+let project: SSTProject;
+let result: AnalysisResult;
+
+beforeAll(() => {
+  project = parseSSTProject(flussRoot);
+  result = analyze(project);
+}, 30000);
+
 describe("analyze (FlussV3)", () => {
   test("analyzes compute resources", () => {
-    const project = parseSSTProject(flussRoot);
-    const result = analyze(project);
     expect(result.functions.length).toBeGreaterThan(0);
   });
 
-  test("detects unlinked ExternalBillingAccount", () => {
-    const project = parseSSTProject(flussRoot);
-    const result = analyze(project);
-
+  test("correctly resolves ExternalBillingAccount as linked on BillingApi routes", () => {
     const v = result.violations.find(
-      (v) => v.type === "unlinked-resource" && v.message.includes("ExternalBillingAccount"),
+      (v) =>
+        v.resource.startsWith("BillingApi:") &&
+        v.type === "unlinked-resource" &&
+        v.message.includes("ExternalBillingAccount"),
     );
-    expect(v).toBeDefined();
+    expect(v).toBeUndefined();
   });
 
   test("does not flag Resource.App as unlinked", () => {
-    const project = parseSSTProject(flussRoot);
-    const result = analyze(project);
-
     const v = result.violations.find(
       (v) => v.type === "unlinked-resource" && v.message.includes("Resource.App"),
     );
@@ -32,9 +36,6 @@ describe("analyze (FlussV3)", () => {
   });
 
   test("correctly identifies linked BillingErrorFromEmail", () => {
-    const project = parseSSTProject(flussRoot);
-    const result = analyze(project);
-
     const v = result.violations.find(
       (v) => v.resource.includes("BillingErrorQueue") && v.type === "unlinked-resource" && v.message.includes("BillingErrorFromEmail"),
     );
@@ -42,9 +43,8 @@ describe("analyze (FlussV3)", () => {
   });
 
   test("respects filter option", () => {
-    const project = parseSSTProject(flussRoot);
-    const result = analyze(project, { filter: "Webhook" });
-    expect(result.functions).toHaveLength(1);
-    expect(result.functions[0].resource.name).toBe("Webhook");
+    const filtered = analyze(project, { filter: "Webhook" });
+    expect(filtered.functions).toHaveLength(1);
+    expect(filtered.functions[0].resource.name).toBe("Webhook");
   });
 });

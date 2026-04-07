@@ -1,17 +1,22 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import { parseSSTProject } from "./parser.js";
 import { resourceCategory } from "./types.js";
+import type { SSTProject } from "./types.js";
 
 const flussRoot = "/home/alist/Work/FlussDashBoard/FlussV3";
 
+let project: SSTProject;
+
+beforeAll(() => {
+  project = parseSSTProject(flussRoot);
+}, 30000);
+
 describe("parseSSTProject", () => {
   test("finds resources in FlussV3 project", () => {
-    const project = parseSSTProject(flussRoot);
     expect(project.resources.size).toBeGreaterThan(0);
   });
 
   test("detects API Gateways", () => {
-    const project = parseSSTProject(flussRoot);
     const apis = [...project.resources.values()].filter(
       (r) => r.type === "ApiGatewayV2",
     );
@@ -19,7 +24,6 @@ describe("parseSSTProject", () => {
   });
 
   test("detects API routes with handlers", () => {
-    const project = parseSSTProject(flussRoot);
     const routes = [...project.resources.values()].filter(
       (r) => r.type === "ApiRoute",
     );
@@ -30,7 +34,6 @@ describe("parseSSTProject", () => {
   });
 
   test("routes inherit links from parent API", () => {
-    const project = parseSSTProject(flussRoot);
     const billingRoute = [...project.resources.values()].find(
       (r) => r.type === "ApiRoute" && r.name.startsWith("BillingApi:"),
     );
@@ -39,7 +42,6 @@ describe("parseSSTProject", () => {
   });
 
   test("detects queue subscribers with permissions", () => {
-    const project = parseSSTProject(flussRoot);
     const subscribers = [...project.resources.values()].filter(
       (r) => r.type === "QueueSubscriber",
     );
@@ -51,11 +53,10 @@ describe("parseSSTProject", () => {
     expect(sub!.permissions[0].actions).toContain("ses:SendEmail");
   });
 
-  test("extracts permissions from API transform config", () => {
-    const project = parseSSTProject(flussRoot);
+  test("resolves spread config permissions (crossAccountTransform)", () => {
     const billingApi = project.resources.get("BillingApi");
     expect(billingApi).toBeDefined();
-    expect(billingApi!.permissions[0].actions).toContain("sts:AssumeRole");
+    expect(billingApi!.permissions.some((p) => p.actions.includes("sts:AssumeRole"))).toBe(true);
   });
 });
 

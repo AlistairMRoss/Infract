@@ -40,6 +40,15 @@ export function analyze(
   return { functions, violations, project };
 }
 
+/** SST auto-grants these permissions when you link a resource of a given type. */
+const SST_AUTO_GRANT_PERMISSIONS: Record<string, string[]> = {
+  Dynamo: ["dynamodb:*"],
+  Bucket: ["s3:*"],
+  Queue: ["sqs:*"],
+  Linkable: [], // Linkables don't auto-grant — they're just env vars
+  Secret: [], // Secrets auto-grant ssm:GetParameter but not IAM actions
+};
+
 function analyzeFunction(
   project: SSTProject,
   resource: SSTResource,
@@ -51,13 +60,27 @@ function analyzeFunction(
     actionSet.add(call.action);
   }
 
+  // Build effective permissions: explicit + auto-granted from linked resources
+  const effectivePermissions: Permission[] = [...resource.permissions];
+
+  for (const linkName of resource.links) {
+    if (linkName.startsWith("...")) continue;
+    const linkedResource = project.resources.get(linkName);
+    if (!linkedResource) continue;
+
+    const autoActions = SST_AUTO_GRANT_PERMISSIONS[linkedResource.type];
+    if (autoActions && autoActions.length > 0) {
+      effectivePermissions.push({ actions: autoActions, resources: ["*"] });
+    }
+  }
+
   return {
     resource,
     detectedSDKCalls: scanResult.sdkCalls,
     requiredActions: [...actionSet],
     linkedResources: resource.links,
     referencedResources: scanResult.resourceRefs,
-    effectivePermissions: resource.permissions,
+    effectivePermissions,
   };
 }
 
@@ -65,15 +88,25 @@ function detectViolations(fn: FunctionAnalysis, project: SSTProject): Violation[
   const violations: Violation[] = [];
 
   // 1. Check permission gaps
+  const hasCrossAccountRole = hasPermissionForAction(fn.effectivePermissions, "sts:AssumeRole");
+
   if (fn.effectivePermissions.length > 0) {
     for (const call of fn.detectedSDKCalls) {
       if (!hasPermissionForAction(fn.effectivePermissions, call.action)) {
+        // If the function assumes a cross-account role, the assumed role may provide
+        // the needed permissions — downgrade from error to warning
+        const severity = hasCrossAccountRole ? "warning" as const : "error" as const;
+        const extra = hasCrossAccountRole
+          ? " (may be provided by the assumed cross-account role)"
+          : "";
         violations.push({
-          severity: "error",
+          severity,
           type: "missing-permission",
           resource: fn.resource.name,
-          message: `calls ${call.method} but lacks ${call.action} permission`,
-          suggestion: `Add { actions: ["${call.action}"], resources: ["*"] } to this function's permissions`,
+          message: `calls ${call.method} but lacks ${call.action} permission${extra}`,
+          suggestion: hasCrossAccountRole
+            ? `Verify the cross-account role grants ${call.action}`
+            : `Add { actions: ["${call.action}"], resources: ["*"] } to this function's permissions`,
           filePath: call.filePath,
           lineNumber: call.lineNumber,
         });

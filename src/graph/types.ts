@@ -12,6 +12,8 @@ export interface SSTResource {
   parentApi: string | null;
   /** Source file and line where this resource is defined */
   definedAt: { file: string; line: number } | null;
+  /** Internal: spread variable references to resolve (e.g., ...crossAccountTransform) */
+  _spreadRefs?: string[];
 }
 
 export type SSTResourceType =
@@ -77,6 +79,8 @@ export interface Violation {
 export interface SSTProject {
   /** All resources by name */
   resources: Map<string, SSTResource>;
+  /** Maps JS variable names to SST resource logical names (e.g., billingAccountTable -> ExternalBillingAccount) */
+  varToResource: Map<string, string>;
   /** Root project directory */
   projectRoot: string;
 }

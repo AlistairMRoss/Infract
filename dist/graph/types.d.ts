@@ -15,6 +15,8 @@ export interface SSTResource {
         file: string;
         line: number;
     } | null;
+    /** Internal: spread variable references to resolve (e.g., ...crossAccountTransform) */
+    _spreadRefs?: string[];
 }
 export type SSTResourceType = "Function" | "ApiGatewayV2" | "Dynamo" | "Bucket" | "Queue" | "Secret" | "Linkable" | "ApiRoute" | "QueueSubscriber" | "Unknown";
 /** An explicit IAM permission on a function or API. */
@@ -63,6 +65,8 @@ export interface Violation {
 export interface SSTProject {
     /** All resources by name */
     resources: Map<string, SSTResource>;
+    /** Maps JS variable names to SST resource logical names (e.g., billingAccountTable -> ExternalBillingAccount) */
+    varToResource: Map<string, string>;
     /** Root project directory */
     projectRoot: string;
 }

@@ -13,6 +13,7 @@ program
     .option("--format <format>", "Output format: console or json", "console")
     .option("--filter <pattern>", "Filter functions by name (supports * wildcard)")
     .option("--strict", "Treat warnings as errors")
+    .option("--no-warnings", "Suppress warnings, only show errors")
     .option("--dir <path>", "Path to SST project root (default: current directory)")
     .action((options) => {
     try {
@@ -32,6 +33,10 @@ function run(options) {
     const result = analyze(project, {
         filter: options.filter,
     });
+    // Filter out warnings if --no-warnings
+    if (options.warnings === false) {
+        result.violations = result.violations.filter((v) => v.severity !== "warning");
+    }
     // Report
     if (options.format === "json") {
         reportJSON(result);
