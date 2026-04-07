@@ -1,133 +1,110 @@
 import type {
-  ResourceGraph,
-  Resource,
+  SSTProject,
+  SSTResource,
   FunctionAnalysis,
   Violation,
+  Permission,
 } from "../graph/types.js";
 import { getComputeResources } from "../graph/types.js";
-import { computeEffectiveActions, hasPermission } from "../iam/policy.js";
-import { scanFunction, AWS_SDK_PATTERNS } from "../codeanalysis/index.js";
+import { scanFunction } from "../codeanalysis/scanner.js";
 
 export interface AnalysisResult {
   functions: FunctionAnalysis[];
   violations: Violation[];
-  graph: ResourceGraph;
+  project: SSTProject;
 }
 
 export interface AnalyzerOptions {
-  projectRoot: string;
   filter?: string;
 }
 
-/** Run the full analysis pipeline. */
+/** Run the full analysis pipeline on an SST project. */
 export function analyze(
-  graph: ResourceGraph,
-  options: AnalyzerOptions,
+  project: SSTProject,
+  options: AnalyzerOptions = {},
 ): AnalysisResult {
-  // Compute effective IAM actions for all roles
-  for (const role of graph.roles.values()) {
-    computeEffectiveActions(role);
-  }
-
-  // Analyze each compute resource
   const functions: FunctionAnalysis[] = [];
-  for (const resource of getComputeResources(graph)) {
+
+  for (const resource of getComputeResources(project)) {
     if (options.filter && !matchFilter(resource.name, options.filter)) {
       continue;
     }
-    functions.push(analyzeFunction(graph, resource, options.projectRoot));
+    functions.push(analyzeFunction(project, resource));
   }
 
-  // Detect violations
   const violations: Violation[] = [];
   for (const fn of functions) {
-    violations.push(...detectViolations(fn));
+    violations.push(...detectViolations(fn, project));
   }
 
-  return { functions, violations, graph };
+  return { functions, violations, project };
 }
 
 function analyzeFunction(
-  graph: ResourceGraph,
-  resource: Resource,
-  projectRoot: string,
+  project: SSTProject,
+  resource: SSTResource,
 ): FunctionAnalysis {
-  const analysis: FunctionAnalysis = {
-    resource,
-    role: null,
-    detectedSDKCalls: [],
-    requiredActions: [],
-    linkedResources: resource.links,
-    usedResources: [],
-  };
+  const scanResult = scanFunction(project.projectRoot, resource);
 
-  // Resolve IAM role
-  if (resource.iamRoleURN) {
-    analysis.role = graph.roles.get(resource.iamRoleURN) ?? null;
-  }
-
-  // Scan source code for SDK calls
-  analysis.detectedSDKCalls = scanFunction(projectRoot, resource);
-
-  // Build required actions and used resource types
   const actionSet = new Set<string>();
-  const resourceTypeSet = new Set<string>();
-
-  for (const call of analysis.detectedSDKCalls) {
+  for (const call of scanResult.sdkCalls) {
     actionSet.add(call.action);
-    const pattern = AWS_SDK_PATTERNS.find((p) => p.service === call.service);
-    if (pattern) resourceTypeSet.add(pattern.resourceType);
   }
 
-  analysis.requiredActions = [...actionSet];
-  analysis.usedResources = [...resourceTypeSet];
-
-  return analysis;
+  return {
+    resource,
+    detectedSDKCalls: scanResult.sdkCalls,
+    requiredActions: [...actionSet],
+    linkedResources: resource.links,
+    referencedResources: scanResult.resourceRefs,
+    effectivePermissions: resource.permissions,
+  };
 }
 
-function detectViolations(fn: FunctionAnalysis): Violation[] {
+function detectViolations(fn: FunctionAnalysis, project: SSTProject): Violation[] {
   const violations: Violation[] = [];
 
-  // Check permission gaps
-  if (fn.role) {
+  // 1. Check permission gaps
+  if (fn.effectivePermissions.length > 0) {
     for (const call of fn.detectedSDKCalls) {
-      if (!hasPermission(fn.role, call.action)) {
+      if (!hasPermissionForAction(fn.effectivePermissions, call.action)) {
         violations.push({
           severity: "error",
           type: "missing-permission",
           resource: fn.resource.name,
           message: `calls ${call.method} but lacks ${call.action} permission`,
-          suggestion: `Add ${call.action} to the function's IAM role`,
+          suggestion: `Add { actions: ["${call.action}"], resources: ["*"] } to this function's permissions`,
           filePath: call.filePath,
           lineNumber: call.lineNumber,
         });
       }
     }
   } else if (fn.detectedSDKCalls.length > 0) {
+    const actions = [...new Set(fn.detectedSDKCalls.map((c) => c.action))];
     violations.push({
       severity: "warning",
-      type: "missing-role",
+      type: "missing-permission",
       resource: fn.resource.name,
-      message: `makes ${fn.detectedSDKCalls.length} AWS SDK call(s) but has no IAM role attached`,
-      suggestion:
-        "Attach an IAM role with appropriate permissions to this function",
+      message: `makes AWS SDK calls requiring [${actions.join(", ")}] but has no explicit permissions defined`,
+      suggestion: "Verify that linked resources auto-grant sufficient permissions, or add explicit permissions",
     });
   }
 
-  // Check unlinked resource usage
-  const linkedTypes = new Set<string>();
-  for (const linkURN of fn.linkedResources) {
-    linkedTypes.add(resourceTypeFromURN(linkURN));
-  }
+  // 2. Check for Resource.X references to resources that aren't linked
+  const linkedNames = new Set(resolveLinkedNames(fn.linkedResources, project));
+  for (const ref of fn.referencedResources) {
+    // Skip SST built-in globals (always available, no link needed)
+    if (SST_BUILTIN_RESOURCES.has(ref.resourceName)) continue;
 
-  for (const usedType of fn.usedResources) {
-    if (!linkedTypes.has(usedType)) {
+    if (!linkedNames.has(ref.resourceName)) {
       violations.push({
-        severity: "warning",
+        severity: "error",
         type: "unlinked-resource",
         resource: fn.resource.name,
-        message: `uses ${usedType} but no ${usedType} resource is linked`,
-        suggestion: `Use .link() in your SST config to bind a ${usedType} resource to this function`,
+        message: `references Resource.${ref.resourceName}.${ref.property} but "${ref.resourceName}" is not linked to this function`,
+        suggestion: `Add the ${ref.resourceName} resource to this function's link array`,
+        filePath: ref.filePath,
+        lineNumber: ref.lineNumber,
       });
     }
   }
@@ -135,16 +112,58 @@ function detectViolations(fn: FunctionAnalysis): Violation[] {
   return violations;
 }
 
-function resourceTypeFromURN(urn: string): string {
-  if (urn.includes("dynamodb")) return "DynamoDB";
-  if (urn.includes("s3")) return "S3";
-  if (urn.includes("ses")) return "SES";
-  if (urn.includes("sqs")) return "SQS";
-  if (urn.includes("sns")) return "SNS";
-  if (urn.includes("events") || urn.includes("eventbridge")) return "EventBridge";
-  if (urn.includes("secretsmanager")) return "SecretsManager";
-  if (urn.includes("ssm")) return "SSM";
-  return "Unknown";
+/** SST built-in Resource properties that are always available without linking. */
+const SST_BUILTIN_RESOURCES = new Set(["App"]);
+
+function hasPermissionForAction(permissions: Permission[], action: string): boolean {
+  for (const perm of permissions) {
+    for (const granted of perm.actions) {
+      if (matchAction(granted, action)) return true;
+    }
+  }
+  return false;
+}
+
+function matchAction(pattern: string, action: string): boolean {
+  if (pattern === "*" || pattern === action) return true;
+
+  const [patternService, patternAction] = pattern.split(":", 2);
+  const [actionService, actionAction] = action.split(":", 2);
+
+  if (!patternAction || !actionAction) return false;
+  if (patternService !== actionService) return false;
+
+  if (patternAction === "*") return true;
+  if (patternAction.endsWith("*")) {
+    return actionAction.startsWith(patternAction.slice(0, -1));
+  }
+  return patternAction.toLowerCase() === actionAction.toLowerCase();
+}
+
+function resolveLinkedNames(links: string[], project: SSTProject): string[] {
+  const names: string[] = [];
+
+  for (const link of links) {
+    if (link.startsWith("...")) continue;
+
+    if (project.resources.has(link)) {
+      names.push(link);
+      continue;
+    }
+
+    // Case-insensitive match
+    for (const [resourceName] of project.resources) {
+      if (resourceName.toLowerCase() === link.toLowerCase()) {
+        names.push(resourceName);
+        break;
+      }
+    }
+
+    // Add as-is (may be a linkable or external resource)
+    names.push(link);
+  }
+
+  return names;
 }
 
 function matchFilter(name: string, filter: string): boolean {

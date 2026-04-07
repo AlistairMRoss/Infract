@@ -1,85 +1,69 @@
 import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { parsePreviewJSON } from "./parser.js";
+import { parseSSTProject } from "./parser.js";
 import { resourceCategory } from "./types.js";
 
-const fixture = readFileSync(
-  resolve(import.meta.dir, "../../testdata/preview.json"),
-  "utf-8",
-);
+const flussRoot = "/home/alist/Work/FlussDashBoard/FlussV3";
 
-describe("parsePreviewJSON", () => {
-  test("parses all resources", () => {
-    const graph = parsePreviewJSON(fixture);
-    expect(graph.resources.size).toBe(13);
+describe("parseSSTProject", () => {
+  test("finds resources in FlussV3 project", () => {
+    const project = parseSSTProject(flussRoot);
+    expect(project.resources.size).toBeGreaterThan(0);
   });
 
-  test("extracts 3 IAM roles", () => {
-    const graph = parsePreviewJSON(fixture);
-    expect(graph.roles.size).toBe(3);
+  test("detects API Gateways", () => {
+    const project = parseSSTProject(flussRoot);
+    const apis = [...project.resources.values()].filter(
+      (r) => r.type === "ApiGatewayV2",
+    );
+    expect(apis.length).toBeGreaterThanOrEqual(2);
   });
 
-  test("identifies 3 Lambda functions as compute", () => {
-    const graph = parsePreviewJSON(fixture);
-    const lambdas = [...graph.resources.values()].filter(
-      (r) => r.type === "aws:lambda/function:Function",
+  test("detects API routes with handlers", () => {
+    const project = parseSSTProject(flussRoot);
+    const routes = [...project.resources.values()].filter(
+      (r) => r.type === "ApiRoute",
     );
-    expect(lambdas).toHaveLength(3);
+    expect(routes.length).toBeGreaterThan(0);
+    for (const route of routes) {
+      expect(route.handler).toBeTruthy();
+    }
   });
 
-  test("extracts Lambda handler path", () => {
-    const graph = parsePreviewJSON(fixture);
-    const sendEmail = graph.resources.get(
-      "urn:pulumi:dev::my-app::aws:lambda/function:Function::sendEmail",
+  test("routes inherit links from parent API", () => {
+    const project = parseSSTProject(flussRoot);
+    const billingRoute = [...project.resources.values()].find(
+      (r) => r.type === "ApiRoute" && r.name.startsWith("BillingApi:"),
     );
-    expect(sendEmail?.handler).toBe("packages/functions/src/email.handler");
+    expect(billingRoute).toBeDefined();
+    expect(billingRoute!.links.length).toBeGreaterThan(0);
   });
 
-  test("detects SST links via SST_RESOURCE_ env vars", () => {
-    const graph = parsePreviewJSON(fixture);
-
-    const sendEmail = graph.resources.get(
-      "urn:pulumi:dev::my-app::aws:lambda/function:Function::sendEmail",
+  test("detects queue subscribers with permissions", () => {
+    const project = parseSSTProject(flussRoot);
+    const subscribers = [...project.resources.values()].filter(
+      (r) => r.type === "QueueSubscriber",
     );
-    expect(sendEmail?.links).toHaveLength(1);
+    expect(subscribers.length).toBeGreaterThanOrEqual(1);
 
-    const getUser = graph.resources.get(
-      "urn:pulumi:dev::my-app::aws:lambda/function:Function::getUser",
-    );
-    expect(getUser?.links).toHaveLength(1);
-
-    const uploadFile = graph.resources.get(
-      "urn:pulumi:dev::my-app::aws:lambda/function:Function::uploadFile",
-    );
-    expect(uploadFile?.links).toHaveLength(0);
+    const sub = subscribers.find((s) => s.name.includes("BillingErrorQueue"));
+    expect(sub).toBeDefined();
+    expect(sub!.handler).toBeTruthy();
+    expect(sub!.permissions[0].actions).toContain("ses:SendEmail");
   });
 
-  test("parses inline IAM policies", () => {
-    const graph = parsePreviewJSON(fixture);
-    const role = graph.roles.get(
-      "urn:pulumi:dev::my-app::aws:iam/role:Role::sendEmailFunctionRole",
-    );
-    expect(role).toBeDefined();
-    expect(role!.inlinePolicies).toHaveLength(1);
-    expect(role!.attachedPolicies).toHaveLength(1);
-
-    const stmt = role!.inlinePolicies[0].statements[0];
-    expect(stmt.effect).toBe("Allow");
-    expect(stmt.actions).toContain("ses:SendEmail");
-    expect(stmt.actions).toContain("ses:SendRawEmail");
+  test("extracts permissions from API transform config", () => {
+    const project = parseSSTProject(flussRoot);
+    const billingApi = project.resources.get("BillingApi");
+    expect(billingApi).toBeDefined();
+    expect(billingApi!.permissions[0].actions).toContain("sts:AssumeRole");
   });
 });
 
 describe("resourceCategory", () => {
-  test("maps known types", () => {
-    expect(resourceCategory({ type: "aws:lambda/function:Function" } as any)).toBe("Lambda function");
-    expect(resourceCategory({ type: "aws:dynamodb/table:Table" } as any)).toBe("DynamoDB table");
-    expect(resourceCategory({ type: "aws:s3/bucketV2:BucketV2" } as any)).toBe("S3 bucket");
-    expect(resourceCategory({ type: "aws:ses/emailIdentity:EmailIdentity" } as any)).toBe("SES identity");
-  });
-
-  test("returns raw type for unknown", () => {
-    expect(resourceCategory({ type: "aws:unknown/thing:Thing" } as any)).toBe("aws:unknown/thing:Thing");
+  test("maps SST types to readable names", () => {
+    expect(resourceCategory("Function")).toBe("Lambda function");
+    expect(resourceCategory("Dynamo")).toBe("DynamoDB table");
+    expect(resourceCategory("Bucket")).toBe("S3 bucket");
+    expect(resourceCategory("Queue")).toBe("SQS queue");
   });
 });

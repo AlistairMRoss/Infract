@@ -1,72 +1,50 @@
 import { describe, test, expect } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { parsePreviewJSON } from "../graph/parser.js";
+import { parseSSTProject } from "../graph/parser.js";
 import { analyze } from "./analyzer.js";
 
-const projectRoot = resolve(import.meta.dir, "../..");
-const fixture = readFileSync(
-  resolve(projectRoot, "testdata/preview.json"),
-  "utf-8",
-);
+const flussRoot = "/home/alist/Work/FlussDashBoard/FlussV3";
 
-describe("analyze", () => {
-  test("analyzes all 3 functions", () => {
-    const graph = parsePreviewJSON(fixture);
-    const result = analyze(graph, { projectRoot });
-    expect(result.functions).toHaveLength(3);
+describe("analyze (FlussV3)", () => {
+  test("analyzes compute resources", () => {
+    const project = parseSSTProject(flussRoot);
+    const result = analyze(project);
+    expect(result.functions.length).toBeGreaterThan(0);
   });
 
-  test("detects missing s3:GetObject permission on sendEmail", () => {
-    const graph = parsePreviewJSON(fixture);
-    const result = analyze(graph, { projectRoot });
+  test("detects unlinked ExternalBillingAccount", () => {
+    const project = parseSSTProject(flussRoot);
+    const result = analyze(project);
 
-    const s3Violation = result.violations.find(
-      (v) =>
-        v.resource === "sendEmail" &&
-        v.type === "missing-permission" &&
-        v.message.includes("s3:GetObject"),
+    const v = result.violations.find(
+      (v) => v.type === "unlinked-resource" && v.message.includes("ExternalBillingAccount"),
     );
-    expect(s3Violation).toBeDefined();
-    expect(s3Violation!.severity).toBe("error");
+    expect(v).toBeDefined();
   });
 
-  test("detects unlinked S3 usage on uploadFile", () => {
-    const graph = parsePreviewJSON(fixture);
-    const result = analyze(graph, { projectRoot });
+  test("does not flag Resource.App as unlinked", () => {
+    const project = parseSSTProject(flussRoot);
+    const result = analyze(project);
 
-    const unlinkViolation = result.violations.find(
-      (v) => v.resource === "uploadFile" && v.type === "unlinked-resource",
+    const v = result.violations.find(
+      (v) => v.type === "unlinked-resource" && v.message.includes("Resource.App"),
     );
-    expect(unlinkViolation).toBeDefined();
-    expect(unlinkViolation!.severity).toBe("warning");
+    expect(v).toBeUndefined();
   });
 
-  test("does not flag getUser for permission issues (has dynamodb:GetItem)", () => {
-    const graph = parsePreviewJSON(fixture);
-    const result = analyze(graph, { projectRoot });
+  test("correctly identifies linked BillingErrorFromEmail", () => {
+    const project = parseSSTProject(flussRoot);
+    const result = analyze(project);
 
-    const getUserPermViolation = result.violations.find(
-      (v) => v.resource === "getUser" && v.type === "missing-permission",
+    const v = result.violations.find(
+      (v) => v.resource.includes("BillingErrorQueue") && v.type === "unlinked-resource" && v.message.includes("BillingErrorFromEmail"),
     );
-    expect(getUserPermViolation).toBeUndefined();
+    expect(v).toBeUndefined();
   });
 
   test("respects filter option", () => {
-    const graph = parsePreviewJSON(fixture);
-    const result = analyze(graph, { projectRoot, filter: "send*" });
+    const project = parseSSTProject(flussRoot);
+    const result = analyze(project, { filter: "Webhook" });
     expect(result.functions).toHaveLength(1);
-    expect(result.functions[0].resource.name).toBe("sendEmail");
-  });
-
-  test("produces violations with file paths and line numbers", () => {
-    const graph = parsePreviewJSON(fixture);
-    const result = analyze(graph, { projectRoot });
-
-    const permViolation = result.violations.find(
-      (v) => v.type === "missing-permission",
-    );
-    expect(permViolation?.filePath).toContain("email.ts");
-    expect(permViolation?.lineNumber).toBeGreaterThan(0);
+    expect(result.functions[0].resource.name).toBe("Webhook");
   });
 });

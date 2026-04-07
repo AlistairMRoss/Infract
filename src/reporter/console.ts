@@ -2,7 +2,6 @@ import chalk from "chalk";
 import type { AnalysisResult } from "../analyzer/analyzer.js";
 import type { Violation } from "../graph/types.js";
 import { resourceCategory } from "../graph/types.js";
-import { hasPermission } from "../iam/policy.js";
 
 /** Output analysis results to the console. */
 export function reportConsole(result: AnalysisResult, explain: boolean): void {
@@ -14,14 +13,14 @@ export function reportConsole(result: AnalysisResult, explain: boolean): void {
 }
 
 function reportExplain(result: AnalysisResult): void {
-  // Resource graph summary
+  // Resource summary
   console.log();
-  console.log(chalk.bold("Resource Graph"));
-  console.log(`Found ${result.graph.resources.size} resources:`);
+  console.log(chalk.bold("SST Project Resources"));
+  console.log(`Found ${result.project.resources.size} resources:`);
 
   const counts = new Map<string, number>();
-  for (const res of result.graph.resources.values()) {
-    const cat = resourceCategory(res);
+  for (const res of result.project.resources.values()) {
+    const cat = resourceCategory(res.type);
     counts.set(cat, (counts.get(cat) ?? 0) + 1);
   }
   for (const [cat, count] of counts) {
@@ -33,39 +32,24 @@ function reportExplain(result: AnalysisResult): void {
   console.log(chalk.bold("Resource Links"));
   for (const fn of result.functions) {
     if (fn.linkedResources.length > 0) {
-      const names = fn.linkedResources.map((urn) => {
-        const res = result.graph.resources.get(urn);
-        return res ? res.name : urn;
-      });
-      console.log(`  ${fn.resource.name} -> linked to: [${names.join(", ")}]`);
+      const linkDisplay = fn.linkedResources
+        .map((l) => l.startsWith("...") ? chalk.dim(l) : l)
+        .join(", ");
+      console.log(`  ${fn.resource.name} -> [${linkDisplay}]`);
     } else {
-      console.log(
-        chalk.yellow(`  ${fn.resource.name} -> linked to: [] (no links)`),
-      );
+      console.log(chalk.yellow(`  ${fn.resource.name} -> [] (no links)`));
     }
   }
 
-  // IAM permissions
+  // Permissions
   console.log();
-  console.log(chalk.bold("IAM Permissions"));
+  console.log(chalk.bold("Permissions"));
   for (const fn of result.functions) {
-    if (fn.role) {
-      console.log(`  ${fn.resource.name} has role: ${fn.role.name}`);
-      if (fn.role.attachedPolicies.length > 0) {
-        console.log(
-          `    Attached policies: ${fn.role.attachedPolicies.join(", ")}`,
-        );
-      }
-      if (fn.role.inlinePolicies.length > 0) {
-        console.log(`    Inline policies: ${fn.role.inlinePolicies.length}`);
-      }
-      console.log(
-        `    Effective actions: [${fn.role.effectiveActions.join(", ")}]`,
-      );
+    if (fn.effectivePermissions.length > 0) {
+      const actions = fn.effectivePermissions.flatMap((p) => p.actions);
+      console.log(`  ${fn.resource.name}: [${actions.join(", ")}]`);
     } else {
-      console.log(
-        chalk.yellow(`  ${fn.resource.name} has no IAM role attached`),
-      );
+      console.log(chalk.dim(`  ${fn.resource.name}: (none defined — relying on link auto-grants)`));
     }
   }
 
@@ -73,30 +57,36 @@ function reportExplain(result: AnalysisResult): void {
   console.log();
   console.log(chalk.bold("SDK Usage Detection"));
   for (const fn of result.functions) {
-    if (fn.detectedSDKCalls.length === 0) {
-      console.log(
-        chalk.cyan(`  ${fn.resource.name}: no AWS SDK calls detected`),
-      );
+    const handler = fn.resource.handler ?? "(unknown handler)";
+
+    if (fn.detectedSDKCalls.length === 0 && fn.referencedResources.length === 0) {
+      console.log(chalk.dim(`  ${fn.resource.name}: no AWS SDK calls or Resource refs detected`));
       continue;
     }
 
-    const handler = fn.resource.handler ?? "(unknown handler)";
     console.log(`  ${fn.resource.name} (${handler})`);
 
     for (const call of fn.detectedSDKCalls) {
-      const permitted = fn.role ? hasPermission(fn.role, call.action) : false;
-      if (permitted) {
-        console.log(
-          chalk.green(
-            `    Line ${call.lineNumber}: ${call.method} -> requires ${call.action} OK`,
-          ),
+      const hasPerm =
+        fn.effectivePermissions.length === 0 ||
+        fn.effectivePermissions.some((p) =>
+          p.actions.some((a) => matchActionSimple(a, call.action)),
         );
+      if (hasPerm) {
+        console.log(chalk.green(`    Line ${call.lineNumber}: ${call.method} -> ${call.action} OK`));
       } else {
-        console.log(
-          chalk.red(
-            `    Line ${call.lineNumber}: ${call.method} -> requires ${call.action} MISSING`,
-          ),
-        );
+        console.log(chalk.red(`    Line ${call.lineNumber}: ${call.method} -> ${call.action} MISSING`));
+      }
+    }
+
+    for (const ref of fn.referencedResources) {
+      const isLinked = fn.linkedResources.some(
+        (l) => l === ref.resourceName || l.toLowerCase() === ref.resourceName.toLowerCase(),
+      );
+      if (isLinked) {
+        console.log(chalk.green(`    Line ${ref.lineNumber}: Resource.${ref.resourceName}.${ref.property} LINKED`));
+      } else {
+        console.log(chalk.red(`    Line ${ref.lineNumber}: Resource.${ref.resourceName}.${ref.property} NOT LINKED`));
       }
     }
   }
@@ -152,13 +142,20 @@ function reportViolations(violations: Violation[]): void {
 
 function violationTitle(type: string): string {
   switch (type) {
-    case "missing-permission":
-      return "Missing IAM Permission";
-    case "unlinked-resource":
-      return "Unlinked Resource Usage";
-    case "missing-role":
-      return "Missing IAM Role";
-    default:
-      return type;
+    case "missing-permission": return "Missing IAM Permission";
+    case "unlinked-resource": return "Unlinked Resource Usage";
+    case "missing-role": return "Missing IAM Role";
+    case "unused-link": return "Unused Link";
+    default: return type;
   }
+}
+
+function matchActionSimple(pattern: string, action: string): boolean {
+  if (pattern === "*" || pattern === action) return true;
+  const [ps, pa] = pattern.split(":", 2);
+  const [as, aa] = action.split(":", 2);
+  if (ps !== as) return false;
+  if (pa === "*") return true;
+  if (pa?.endsWith("*")) return aa?.startsWith(pa.slice(0, -1)) ?? false;
+  return false;
 }

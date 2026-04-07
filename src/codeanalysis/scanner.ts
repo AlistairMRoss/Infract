@@ -1,16 +1,21 @@
 import ts from "typescript";
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
-import type { SDKCall, Resource } from "../graph/types.js";
+import { resolve } from "node:path";
+import type { SDKCall, SSTResource, ResourceRef } from "../graph/types.js";
 import { lookupCommand } from "./patterns.js";
 
-/** Scan a compute resource's source code for AWS SDK calls using the TS compiler API. */
+export interface ScanResult {
+  sdkCalls: SDKCall[];
+  resourceRefs: ResourceRef[];
+}
+
+/** Scan a compute resource's source code for AWS SDK calls and Resource.X references. */
 export function scanFunction(
   projectRoot: string,
-  resource: Resource,
-): SDKCall[] {
+  resource: SSTResource,
+): ScanResult {
   const filePath = resolveHandlerPath(projectRoot, resource.handler);
-  if (!filePath) return [];
+  if (!filePath) return { sdkCalls: [], resourceRefs: [] };
 
   return scanFile(filePath);
 }
@@ -43,7 +48,7 @@ function resolveHandlerPath(
 }
 
 /** Scan a single file using the TypeScript compiler API. */
-function scanFile(filePath: string): SDKCall[] {
+function scanFile(filePath: string): ScanResult {
   const program = ts.createProgram([filePath], {
     target: ts.ScriptTarget.ESNext,
     module: ts.ModuleKind.ESNext,
@@ -54,9 +59,10 @@ function scanFile(filePath: string): SDKCall[] {
   });
 
   const sourceFile = program.getSourceFile(filePath);
-  if (!sourceFile) return [];
+  if (!sourceFile) return { sdkCalls: [], resourceRefs: [] };
 
-  const calls: SDKCall[] = [];
+  const sdkCalls: SDKCall[] = [];
+  const resourceRefs: ResourceRef[] = [];
 
   // Track which command names are imported from AWS SDK packages
   const importedCommands = new Set<string>();
@@ -68,12 +74,10 @@ function scanFile(filePath: string): SDKCall[] {
       if (ts.isStringLiteral(moduleSpecifier)) {
         const pkg = moduleSpecifier.text;
         if (pkg.startsWith("@aws-sdk/")) {
-          // Collect named imports
           const clause = node.importClause;
           if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
             for (const specifier of clause.namedBindings.elements) {
               const name = specifier.name.text;
-              // Only track names that match known commands
               if (lookupCommand(name)) {
                 importedCommands.add(name);
               }
@@ -84,12 +88,10 @@ function scanFile(filePath: string): SDKCall[] {
     }
   });
 
-  // Second pass: find `new XxxCommand(...)` expressions
+  // Second pass: find SDK calls and Resource.X references
   function visit(node: ts.Node): void {
-    if (
-      ts.isNewExpression(node) &&
-      ts.isIdentifier(node.expression)
-    ) {
+    // Detect: new XxxCommand(...)
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression)) {
       const commandName = node.expression.text;
       if (importedCommands.has(commandName)) {
         const pattern = lookupCommand(commandName);
@@ -98,16 +100,36 @@ function scanFile(filePath: string): SDKCall[] {
             node.getStart(sourceFile!),
           );
           for (const action of pattern.requiredActions) {
-            calls.push({
+            sdkCalls.push({
               service: pattern.service,
               method: commandName,
               action,
               filePath,
-              lineNumber: line + 1, // 1-based
+              lineNumber: line + 1,
             });
           }
         }
       }
+    }
+
+    // Detect: Resource.MyTable.name, Resource.MyBucket.url, etc.
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "Resource"
+    ) {
+      const resourceName = node.expression.name.text;
+      const property = node.name.text;
+      const { line } = sourceFile!.getLineAndCharacterOfPosition(
+        node.getStart(sourceFile!),
+      );
+      resourceRefs.push({
+        resourceName,
+        property,
+        filePath,
+        lineNumber: line + 1,
+      });
     }
 
     ts.forEachChild(node, visit);
@@ -115,13 +137,26 @@ function scanFile(filePath: string): SDKCall[] {
 
   ts.forEachChild(sourceFile, visit);
 
-  return deduplicateCalls(calls);
+  return {
+    sdkCalls: deduplicateCalls(sdkCalls),
+    resourceRefs: deduplicateRefs(resourceRefs),
+  };
 }
 
 function deduplicateCalls(calls: SDKCall[]): SDKCall[] {
   const seen = new Set<string>();
   return calls.filter((call) => {
     const key = `${call.action}|${call.filePath}|${call.lineNumber}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function deduplicateRefs(refs: ResourceRef[]): ResourceRef[] {
+  const seen = new Set<string>();
+  return refs.filter((ref) => {
+    const key = `${ref.resourceName}|${ref.filePath}|${ref.lineNumber}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;

@@ -1,113 +1,115 @@
-/** A cloud resource from the Pulumi preview output. */
-export interface Resource {
-  urn: string;
-  type: string; // e.g., aws:lambda/function:Function
+/** An SST resource (Dynamo table, Bucket, Queue, Function, etc.) */
+export interface SSTResource {
   name: string;
-  op: string; // create, update, delete, same
-  properties: Record<string, unknown>;
-  links: string[]; // URNs of linked resources (SST link mechanism)
-  iamRoleURN: string | null;
-  handler: string | null; // For Lambda: handler path
+  type: SSTResourceType;
+  /** For Functions: handler file path */
+  handler: string | null;
+  /** Names of linked resources */
+  links: string[];
+  /** Explicit IAM permissions granted */
+  permissions: Permission[];
+  /** For API routes: the parent API name */
+  parentApi: string | null;
+  /** Source file and line where this resource is defined */
+  definedAt: { file: string; line: number } | null;
 }
 
-/** Parsed IAM role with its policies. */
-export interface IAMRole {
-  urn: string;
-  name: string;
-  inlinePolicies: Policy[];
-  attachedPolicies: string[]; // ARNs of managed policies
-  effectiveActions: string[]; // Computed: all allowed actions
-  deniedActions: string[]; // Computed: explicitly denied actions
-}
+export type SSTResourceType =
+  | "Function"
+  | "ApiGatewayV2"
+  | "Dynamo"
+  | "Bucket"
+  | "Queue"
+  | "Secret"
+  | "Linkable"
+  | "ApiRoute"
+  | "QueueSubscriber"
+  | "Unknown";
 
-/** A parsed IAM policy document. */
-export interface Policy {
-  name: string;
-  statements: PolicyStatement[];
-}
-
-/** A single statement in an IAM policy. */
-export interface PolicyStatement {
-  effect: "Allow" | "Deny";
+/** An explicit IAM permission on a function or API. */
+export interface Permission {
   actions: string[];
   resources: string[];
 }
 
 /** A detected AWS SDK call in source code. */
 export interface SDKCall {
-  service: string; // e.g., s3, ses, dynamodb
-  method: string; // e.g., GetObjectCommand, sendEmail
-  action: string; // IAM action: e.g., s3:GetObject
+  service: string;
+  method: string;
+  action: string;
   filePath: string;
-  lineNumber: int;
+  lineNumber: number;
 }
 
-// TypeScript doesn't have `int` — using number
-type int = number;
+/** A Resource.X.name / Resource.X.url reference found in handler code. */
+export interface ResourceRef {
+  resourceName: string;
+  property: string; // "name", "url", "email", etc.
+  filePath: string;
+  lineNumber: number;
+}
 
-/** Combined analysis results for a compute resource. */
+/** Combined analysis results for a compute resource (Function, route handler, queue subscriber). */
 export interface FunctionAnalysis {
-  resource: Resource;
-  role: IAMRole | null;
+  resource: SSTResource;
   detectedSDKCalls: SDKCall[];
   requiredActions: string[];
+  /** Resource names linked to this function (from SST config) */
   linkedResources: string[];
-  usedResources: string[]; // Resource type categories inferred from SDK calls
+  /** Resource names actually referenced in code via Resource.X */
+  referencedResources: ResourceRef[];
+  /** Effective permissions from direct + inherited (API-level) */
+  effectivePermissions: Permission[];
 }
 
 /** A detected permission or linking gap. */
 export interface Violation {
   severity: "error" | "warning";
-  type: "missing-permission" | "unlinked-resource" | "missing-role";
-  resource: string; // Function name
+  type: "missing-permission" | "unlinked-resource" | "missing-role" | "unused-link";
+  resource: string;
   message: string;
   suggestion: string;
   filePath?: string;
   lineNumber?: number;
 }
 
-/** In-memory representation of all resources and their relationships. */
-export interface ResourceGraph {
-  resources: Map<string, Resource>; // URN -> Resource
-  roles: Map<string, IAMRole>; // URN -> IAMRole
+/** The parsed SST project graph. */
+export interface SSTProject {
+  /** All resources by name */
+  resources: Map<string, SSTResource>;
+  /** Root project directory */
+  projectRoot: string;
 }
 
-/** Returns true if the resource is a compute resource. */
-export function isCompute(r: Resource): boolean {
-  return (
-    r.type === "aws:lambda/function:Function" ||
-    r.type === "aws:ecs/taskDefinition:TaskDefinition"
-  );
-}
-
-/** Human-friendly category for a resource type. */
-export function resourceCategory(r: Resource): string {
-  switch (r.type) {
-    case "aws:lambda/function:Function":
-      return "Lambda function";
-    case "aws:dynamodb/table:Table":
-      return "DynamoDB table";
-    case "aws:s3/bucket:Bucket":
-    case "aws:s3/bucketV2:BucketV2":
-      return "S3 bucket";
-    case "aws:ses/emailIdentity:EmailIdentity":
-    case "aws:sesv2/emailIdentity:EmailIdentity":
-      return "SES identity";
-    case "aws:sqs/queue:Queue":
-      return "SQS queue";
-    case "aws:sns/topic:Topic":
-      return "SNS topic";
-    case "aws:iam/role:Role":
-      return "IAM role";
-    case "aws:iam/policy:Policy":
-    case "aws:iam/rolePolicy:RolePolicy":
-      return "IAM policy";
-    default:
-      return r.type;
+/** Human-friendly category for an SST resource type. */
+export function resourceCategory(type: SSTResourceType): string {
+  switch (type) {
+    case "Function": return "Lambda function";
+    case "ApiGatewayV2": return "API Gateway";
+    case "ApiRoute": return "API route";
+    case "Dynamo": return "DynamoDB table";
+    case "Bucket": return "S3 bucket";
+    case "Queue": return "SQS queue";
+    case "QueueSubscriber": return "Queue subscriber";
+    case "Secret": return "Secret";
+    case "Linkable": return "Linkable";
+    default: return type;
   }
 }
 
-/** Get all compute resources from the graph. */
-export function getComputeResources(graph: ResourceGraph): Resource[] {
-  return [...graph.resources.values()].filter(isCompute);
+/** Get all compute resources (functions, route handlers, queue subscribers). */
+export function getComputeResources(project: SSTProject): SSTResource[] {
+  return [...project.resources.values()].filter(
+    (r) => r.type === "Function" || r.type === "ApiRoute" || r.type === "QueueSubscriber",
+  );
+}
+
+/** Map SST resource type to a service category for matching against SDK calls. */
+export function resourceTypeToServiceCategory(type: SSTResourceType): string | null {
+  switch (type) {
+    case "Dynamo": return "DynamoDB";
+    case "Bucket": return "S3";
+    case "Queue": return "SQS";
+    default: return null;
+  }
 }
