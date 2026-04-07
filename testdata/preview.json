@@ -1,0 +1,241 @@
+{
+  "steps": [
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:dynamodb/table:Table::usersTable",
+      "type": "aws:dynamodb/table:Table",
+      "name": "usersTable",
+      "resourceInputs": {
+        "name": "users",
+        "hashKey": "id",
+        "attributes": [
+          {"name": "id", "type": "S"}
+        ]
+      },
+      "newState": {
+        "type": "aws:dynamodb/table:Table",
+        "urn": "urn:pulumi:dev::my-app::aws:dynamodb/table:Table::usersTable",
+        "inputs": {},
+        "outputs": {
+          "arn": "arn:aws:dynamodb:us-east-1:123456789:table/users"
+        }
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:s3/bucketV2:BucketV2::uploadsBucket",
+      "type": "aws:s3/bucketV2:BucketV2",
+      "name": "uploadsBucket",
+      "resourceInputs": {
+        "bucket": "my-app-uploads"
+      },
+      "newState": {
+        "type": "aws:s3/bucketV2:BucketV2",
+        "urn": "urn:pulumi:dev::my-app::aws:s3/bucketV2:BucketV2::uploadsBucket",
+        "inputs": {},
+        "outputs": {
+          "arn": "arn:aws:s3:::my-app-uploads"
+        }
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:ses/emailIdentity:EmailIdentity::sesIdentity",
+      "type": "aws:ses/emailIdentity:EmailIdentity",
+      "name": "sesIdentity",
+      "resourceInputs": {
+        "email": "noreply@example.com"
+      },
+      "newState": {
+        "type": "aws:ses/emailIdentity:EmailIdentity",
+        "urn": "urn:pulumi:dev::my-app::aws:ses/emailIdentity:EmailIdentity::sesIdentity",
+        "inputs": {},
+        "outputs": {}
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/role:Role::sendEmailFunctionRole",
+      "type": "aws:iam/role:Role",
+      "name": "sendEmailFunctionRole",
+      "resourceInputs": {
+        "assumeRolePolicy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+      },
+      "newState": {
+        "type": "aws:iam/role:Role",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/role:Role::sendEmailFunctionRole",
+        "inputs": {},
+        "outputs": {
+          "arn": "arn:aws:iam::123456789:role/sendEmailFunctionRole",
+          "name": "sendEmailFunctionRole"
+        }
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicy:RolePolicy::sendEmailPolicy",
+      "type": "aws:iam/rolePolicy:RolePolicy",
+      "name": "sendEmailPolicy",
+      "resourceInputs": {
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::sendEmailFunctionRole",
+        "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"ses:SendEmail\",\"ses:SendRawEmail\"],\"Resource\":\"*\"}]}"
+      },
+      "newState": {
+        "type": "aws:iam/rolePolicy:RolePolicy",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicy:RolePolicy::sendEmailPolicy",
+        "inputs": {},
+        "outputs": {}
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicyAttachment:RolePolicyAttachment::sendEmailBasicExec",
+      "type": "aws:iam/rolePolicyAttachment:RolePolicyAttachment",
+      "name": "sendEmailBasicExec",
+      "resourceInputs": {
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::sendEmailFunctionRole",
+        "policyArn": "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      },
+      "newState": {
+        "type": "aws:iam/rolePolicyAttachment:RolePolicyAttachment",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicyAttachment:RolePolicyAttachment::sendEmailBasicExec",
+        "inputs": {},
+        "outputs": {}
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:lambda/function:Function::sendEmail",
+      "type": "aws:lambda/function:Function",
+      "name": "sendEmail",
+      "resourceInputs": {
+        "handler": "packages/functions/src/email.handler",
+        "runtime": "nodejs20.x",
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::sendEmailFunctionRole",
+        "environment": {
+          "variables": {
+            "SST_RESOURCE_sesIdentity": "{\"type\":\"ses.EmailIdentity\",\"email\":\"noreply@example.com\"}"
+          }
+        }
+      },
+      "newState": {
+        "type": "aws:lambda/function:Function",
+        "urn": "urn:pulumi:dev::my-app::aws:lambda/function:Function::sendEmail",
+        "inputs": {},
+        "outputs": {
+          "arn": "arn:aws:lambda:us-east-1:123456789:function:sendEmail"
+        }
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/role:Role::getUserFunctionRole",
+      "type": "aws:iam/role:Role",
+      "name": "getUserFunctionRole",
+      "resourceInputs": {
+        "assumeRolePolicy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+      },
+      "newState": {
+        "type": "aws:iam/role:Role",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/role:Role::getUserFunctionRole",
+        "inputs": {},
+        "outputs": {
+          "arn": "arn:aws:iam::123456789:role/getUserFunctionRole",
+          "name": "getUserFunctionRole"
+        }
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicy:RolePolicy::getUserPolicy",
+      "type": "aws:iam/rolePolicy:RolePolicy",
+      "name": "getUserPolicy",
+      "resourceInputs": {
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::getUserFunctionRole",
+        "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"dynamodb:GetItem\",\"dynamodb:Query\"],\"Resource\":\"arn:aws:dynamodb:us-east-1:123456789:table/users\"}]}"
+      },
+      "newState": {
+        "type": "aws:iam/rolePolicy:RolePolicy",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicy:RolePolicy::getUserPolicy",
+        "inputs": {},
+        "outputs": {}
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:lambda/function:Function::getUser",
+      "type": "aws:lambda/function:Function",
+      "name": "getUser",
+      "resourceInputs": {
+        "handler": "packages/functions/src/user.handler",
+        "runtime": "nodejs20.x",
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::getUserFunctionRole",
+        "environment": {
+          "variables": {
+            "SST_RESOURCE_usersTable": "{\"type\":\"dynamodb.Table\",\"name\":\"users\"}"
+          }
+        }
+      },
+      "newState": {
+        "type": "aws:lambda/function:Function",
+        "urn": "urn:pulumi:dev::my-app::aws:lambda/function:Function::getUser",
+        "inputs": {},
+        "outputs": {}
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/role:Role::uploadFileFunctionRole",
+      "type": "aws:iam/role:Role",
+      "name": "uploadFileFunctionRole",
+      "resourceInputs": {
+        "assumeRolePolicy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+      },
+      "newState": {
+        "type": "aws:iam/role:Role",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/role:Role::uploadFileFunctionRole",
+        "inputs": {},
+        "outputs": {
+          "arn": "arn:aws:iam::123456789:role/uploadFileFunctionRole",
+          "name": "uploadFileFunctionRole"
+        }
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicy:RolePolicy::uploadFilePolicy",
+      "type": "aws:iam/rolePolicy:RolePolicy",
+      "name": "uploadFilePolicy",
+      "resourceInputs": {
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::uploadFileFunctionRole",
+        "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\"],\"Resource\":\"arn:aws:s3:::my-app-uploads/*\"}]}"
+      },
+      "newState": {
+        "type": "aws:iam/rolePolicy:RolePolicy",
+        "urn": "urn:pulumi:dev::my-app::aws:iam/rolePolicy:RolePolicy::uploadFilePolicy",
+        "inputs": {},
+        "outputs": {}
+      }
+    },
+    {
+      "op": "create",
+      "urn": "urn:pulumi:dev::my-app::aws:lambda/function:Function::uploadFile",
+      "type": "aws:lambda/function:Function",
+      "name": "uploadFile",
+      "resourceInputs": {
+        "handler": "packages/functions/src/upload.handler",
+        "runtime": "nodejs20.x",
+        "role": "urn:pulumi:dev::my-app::aws:iam/role:Role::uploadFileFunctionRole",
+        "environment": {
+          "variables": {}
+        }
+      },
+      "newState": {
+        "type": "aws:lambda/function:Function",
+        "urn": "urn:pulumi:dev::my-app::aws:lambda/function:Function::uploadFile",
+        "inputs": {},
+        "outputs": {}
+      }
+    }
+  ]
+}

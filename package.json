@@ -1,0 +1,21 @@
+{
+  "name": "iac-analyzer",
+  "version": "0.1.0",
+  "description": "Detect permission and linking gaps in SST/Pulumi projects before deployment",
+  "type": "module",
+  "bin": {
+    "iac-analyzer": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun src/cli.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "typescript": "5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.0.0"
+  }
+}
