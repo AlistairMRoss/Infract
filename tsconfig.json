@@ -1,5 +1,6 @@
 {
   "compilerOptions": {
+    "types": ["node", "bun-types"],
     "target": "ES2022",
     "module": "Node16",
     "moduleResolution": "Node16",
@@ -12,5 +13,5 @@
     "sourceMap": true
   },
   "include": ["src"],
-  "exclude": ["node_modules", "testdata", "**/*.test.ts"]
+  "exclude": ["node_modules", "testdata"]
 }

@@ -3,7 +3,6 @@ import type { AnalysisResult } from "../analyzer/analyzer.js";
 import type { Violation } from "../graph/types.js";
 import { resourceCategory } from "../graph/types.js";
 
-/** Output analysis results to the console. */
 export function reportConsole(result: AnalysisResult, explain: boolean): void {
   if (explain) {
     reportExplain(result);
@@ -13,7 +12,6 @@ export function reportConsole(result: AnalysisResult, explain: boolean): void {
 }
 
 function reportExplain(result: AnalysisResult): void {
-  // Resource summary
   console.log();
   console.log(chalk.bold("SST Project Resources"));
   console.log(`Found ${result.project.resources.size} resources:`);
@@ -27,7 +25,6 @@ function reportExplain(result: AnalysisResult): void {
     console.log(`  ${count} ${cat}(s)`);
   }
 
-  // Link analysis
   console.log();
   console.log(chalk.bold("Resource Links"));
   for (const fn of result.functions) {

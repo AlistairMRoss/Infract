@@ -9,8 +9,6 @@ export interface ScanResult {
   resourceRefs: ResourceRef[];
 }
 
-/** Scan a compute resource's source code for AWS SDK calls and Resource.X references.
- *  Follows local imports recursively to find SDK calls in service/lib modules. */
 export function scanFunction(
   projectRoot: string,
   resource: SSTResource,
@@ -18,7 +16,6 @@ export function scanFunction(
   const entryPath = resolveHandlerPath(projectRoot, resource.handler);
   if (!entryPath) return { sdkCalls: [], resourceRefs: [] };
 
-  // Collect all local files reachable from the handler
   const files = collectLocalImports(entryPath);
 
   const allCalls: SDKCall[] = [];
@@ -36,7 +33,6 @@ export function scanFunction(
   };
 }
 
-/** Resolve a Lambda handler reference to an actual file path. */
 function resolveHandlerPath(
   root: string,
   handler: string | null,
@@ -68,7 +64,6 @@ function resolveModulePath(base: string): string | null {
   return null;
 }
 
-/** Recursively collect all local files imported from the entry file. */
 function collectLocalImports(entryPath: string): string[] {
   const visited = new Set<string>();
   const queue = [entryPath];
@@ -90,7 +85,6 @@ function collectLocalImports(entryPath: string): string[] {
     ts.forEachChild(sf, (node) => {
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
         const specifier = node.moduleSpecifier.text;
-        // Only follow relative imports (local project files)
         if (specifier.startsWith(".")) {
           const resolved = resolveModulePath(resolve(dirname(file), specifier));
           if (resolved && !resolved.includes("node_modules")) {
@@ -104,7 +98,6 @@ function collectLocalImports(entryPath: string): string[] {
   return [...visited];
 }
 
-/** Scan a single file for SDK calls and Resource.X references. */
 function scanFile(filePath: string): ScanResult {
   let source: string;
   try {

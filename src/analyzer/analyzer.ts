@@ -18,7 +18,6 @@ export interface AnalyzerOptions {
   filter?: string;
 }
 
-/** Run the full analysis pipeline on an SST project. */
 export function analyze(
   project: SSTProject,
   options: AnalyzerOptions = {},
@@ -40,13 +39,12 @@ export function analyze(
   return { functions, violations, project };
 }
 
-/** SST auto-grants these permissions when you link a resource of a given type. */
 const SST_AUTO_GRANT_PERMISSIONS: Record<string, string[]> = {
   Dynamo: ["dynamodb:*"],
   Bucket: ["s3:*"],
   Queue: ["sqs:*"],
-  Linkable: [], // Linkables don't auto-grant — they're just env vars
-  Secret: [], // Secrets auto-grant ssm:GetParameter but not IAM actions
+  Linkable: [],
+  Secret: [],
 };
 
 function analyzeFunction(
@@ -60,7 +58,6 @@ function analyzeFunction(
     actionSet.add(call.action);
   }
 
-  // Build effective permissions: explicit + auto-granted from linked resources
   const effectivePermissions: Permission[] = [...resource.permissions];
 
   for (const linkName of resource.links) {
@@ -87,14 +84,11 @@ function analyzeFunction(
 function detectViolations(fn: FunctionAnalysis, project: SSTProject): Violation[] {
   const violations: Violation[] = [];
 
-  // 1. Check permission gaps
   const hasCrossAccountRole = hasPermissionForAction(fn.effectivePermissions, "sts:AssumeRole");
 
   if (fn.effectivePermissions.length > 0) {
     for (const call of fn.detectedSDKCalls) {
       if (!hasPermissionForAction(fn.effectivePermissions, call.action)) {
-        // If the function assumes a cross-account role, the assumed role may provide
-        // the needed permissions — downgrade from error to warning
         const severity = hasCrossAccountRole ? "warning" as const : "error" as const;
         const extra = hasCrossAccountRole
           ? " (may be provided by the assumed cross-account role)"
@@ -123,9 +117,9 @@ function detectViolations(fn: FunctionAnalysis, project: SSTProject): Violation[
     });
   }
 
-  // 2. Check for Resource.X references to resources that aren't linked
   const linkedNames = new Set(resolveLinkedNames(fn.linkedResources, project));
   for (const ref of fn.referencedResources) {
+
     // Skip SST built-in globals (always available, no link needed)
     if (SST_BUILTIN_RESOURCES.has(ref.resourceName)) continue;
 
@@ -145,7 +139,6 @@ function detectViolations(fn: FunctionAnalysis, project: SSTProject): Violation[
   return violations;
 }
 
-/** SST built-in Resource properties that are always available without linking. */
 const SST_BUILTIN_RESOURCES = new Set(["App"]);
 
 function hasPermissionForAction(permissions: Permission[], action: string): boolean {
@@ -184,7 +177,6 @@ function resolveLinkedNames(links: string[], project: SSTProject): string[] {
       continue;
     }
 
-    // Case-insensitive match
     for (const [resourceName] of project.resources) {
       if (resourceName.toLowerCase() === link.toLowerCase()) {
         names.push(resourceName);
@@ -192,7 +184,6 @@ function resolveLinkedNames(links: string[], project: SSTProject): string[] {
       }
     }
 
-    // Add as-is (may be a linkable or external resource)
     names.push(link);
   }
 
