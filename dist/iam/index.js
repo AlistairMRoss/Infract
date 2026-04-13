@@ -1,2 +1,0 @@
-export { matchAction } from "./policy.js";
-//# sourceMappingURL=index.js.map
