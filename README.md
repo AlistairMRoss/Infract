@@ -1,4 +1,4 @@
-# can-it-deploy-iac
+# infract
 
 Static analysis tool for [SST](https://sst.dev) projects that detects permission and resource linking gaps **before deployment**.
 
@@ -12,9 +12,9 @@ No AWS credentials or deployment required. Runs entirely against your source cod
 ## Install
 
 ```bash
-npm install can-it-deploy-iac
+npm install infract
 # or
-yarn add can-it-deploy-iac
+bun add infract
 ```
 
 ## Usage
@@ -22,7 +22,7 @@ yarn add can-it-deploy-iac
 Run from your SST project root:
 
 ```bash
-npx can-it-deploy
+npx infract
 ```
 
 ### Options
@@ -33,26 +33,26 @@ npx can-it-deploy
 | `--no-warnings` | Suppress warnings, only show errors |
 | `--strict` | Treat warnings as errors (exit code 1) |
 | `--filter <pattern>` | Filter functions by name (supports `*` wildcard) |
-| `--format json` | Output results as JSON (for CI/CD pipelines) |
+| `--format <format>` | Output format: `console` (default) or `json` |
 | `--dir <path>` | Path to SST project root (default: current directory) |
 
 ### Examples
 
 ```bash
 # Quick check — errors only
-npx can-it-deploy --no-warnings
+npx infract --no-warnings
 
 # Detailed analysis of everything
-npx can-it-deploy --explain
+npx infract --explain
 
 # Only check billing routes
-npx can-it-deploy --filter "BillingApi:*"
+npx infract --filter "BillingApi:*"
 
 # JSON output for CI
-npx can-it-deploy --format json --strict
+npx infract --format json --strict
 
 # Point to a different project
-npx can-it-deploy --dir /path/to/my-sst-project
+npx infract --dir /path/to/my-sst-project
 ```
 
 ## What it detects
@@ -85,11 +85,13 @@ If the function has `sts:AssumeRole` (cross-account access), missing permissions
 
 ## How it works
 
-1. **Parses `sst.config.ts`** — follows all imports and re-exports to discover your full infrastructure definition
+See [howItWorks.md](./howItWorks.md) for a deeper walkthrough. Short version:
+
+1. **Parses `sst.config.ts`** — follows all imports and re-exports via the TypeScript compiler API to discover your full infrastructure definition
 2. **Extracts resources** — identifies Functions, API routes (`api.route()`), queue subscribers (`.subscribe()`), DynamoDB tables, S3 buckets, queues, secrets, and linkables
-3. **Resolves links** — maps variable names to SST resource names (e.g., `billingAccountTable` -> `ExternalBillingAccount`), expands array variables (`allLinkables`), and resolves spread configs (`...crossAccountTransform`)
+3. **Resolves links** — maps variable names to SST resource names (e.g., `billingAccountTable` → `ExternalBillingAccount`), expands array variables (`allLinkables`), and resolves spread configs (`...crossAccountTransform`)
 4. **Resolves permissions** — collects explicit permissions from `permissions: [...]`, `transform.route.handler.permissions`, and spread objects, plus auto-grants from linked resources (linking a `Dynamo` auto-grants `dynamodb:*`, `Bucket` grants `s3:*`, `Queue` grants `sqs:*`)
-5. **Scans handler source code** — uses the TypeScript compiler API to walk the AST, following local imports recursively into service/lib modules. Detects:
+5. **Scans handler source code** — walks the AST, following local imports recursively into service/lib modules. Detects:
    - AWS SDK v3 command usage (`new GetItemCommand(...)`, `new SendEmailCommand(...)`, etc.)
    - `@aws-sdk/lib-dynamodb` simplified commands (`GetCommand`, `PutCommand`, etc.)
    - `Resource.X.name` / `Resource.X.url` references
@@ -155,13 +157,22 @@ Use `--format json` for programmatic consumption:
 
 ```bash
 # Fail the build if any errors are found
-npx can-it-deploy --no-warnings
+npx infract --no-warnings
 
 # Fail on warnings too
-npx can-it-deploy --strict
+npx infract --strict
 
 # JSON for parsing in scripts
-npx can-it-deploy --format json --no-warnings | jq '.summary.totalErrors'
+npx infract --format json --no-warnings | jq '.summary.totalErrors'
+```
+
+## Development
+
+```bash
+bun install
+bun run dev          # run from source
+bun test             # run tests
+bun run build        # compile to dist/
 ```
 
 ## License
