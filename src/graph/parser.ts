@@ -135,15 +135,21 @@ function resolveImportPath(
   fromFile: string,
   projectRoot: string,
 ): string | null {
-  if (!specifier.startsWith(".") && !specifier.startsWith("/")) return null;
+  if (specifier.startsWith(".") || specifier.startsWith("/")) {
+    const base = specifier.startsWith("/")
+      ? resolve(projectRoot, specifier)
+      : resolve(dirname(fromFile), specifier);
 
-  const base = specifier.startsWith("/")
-    ? resolve(projectRoot, specifier)
-    : resolve(dirname(fromFile), specifier);
+    if (base.includes(".sst/platform")) return null;
 
-  if (base.includes("node_modules") || base.includes(".sst/platform")) return null;
+    return resolveFileOrIndex(base);
+  }
 
-  const extensions = [".ts", ".tsx", ".js", ".jsx"];
+  return resolveBareSpecifier(specifier, fromFile);
+}
+
+function resolveFileOrIndex(base: string): string | null {
+  const extensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"];
 
   for (const ext of extensions) {
     const candidate = base + ext;
@@ -157,6 +163,107 @@ function resolveImportPath(
 
   if (existsSync(base)) return base;
 
+  return null;
+}
+
+function resolveBareSpecifier(specifier: string, fromFile: string): string | null {
+  const { pkgName, subpath } = parseBareSpecifier(specifier);
+
+  const pkgRoot = findPackageRoot(pkgName, fromFile);
+  if (!pkgRoot) return null;
+
+  const pkgJsonPath = resolve(pkgRoot, "package.json");
+  let pkgJson: Record<string, unknown> | null = null;
+  try {
+    pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf-8")) as Record<string, unknown>;
+  } catch {
+    pkgJson = null;
+  }
+
+  if (pkgJson) {
+    const viaExports = resolveExports(pkgJson.exports, subpath, pkgRoot);
+    if (viaExports) return viaExports;
+
+    if (subpath === null) {
+      for (const field of ["main", "module"]) {
+        const value = pkgJson[field];
+        if (typeof value === "string") {
+          const resolved = resolveFileOrIndex(resolve(pkgRoot, value));
+          if (resolved) return resolved;
+        }
+      }
+    }
+  }
+
+  const directTarget = subpath === null ? pkgRoot : resolve(pkgRoot, subpath);
+  const direct = resolveFileOrIndex(directTarget);
+  if (direct) return direct;
+
+  if (subpath !== null) {
+    for (const distPrefix of ["dist/src", "dist", "build", "lib"]) {
+      const candidate = resolve(pkgRoot, distPrefix, subpath);
+      const resolved = resolveFileOrIndex(candidate);
+      if (resolved) return resolved;
+    }
+  }
+
+  return null;
+}
+
+function parseBareSpecifier(specifier: string): { pkgName: string; subpath: string | null } {
+  if (specifier.startsWith("@")) {
+    const parts = specifier.split("/");
+    if (parts.length < 2) return { pkgName: specifier, subpath: null };
+    const pkgName = `${parts[0]}/${parts[1]}`;
+    const subpath = parts.length > 2 ? parts.slice(2).join("/") : null;
+    return { pkgName, subpath };
+  }
+  const slash = specifier.indexOf("/");
+  if (slash === -1) return { pkgName: specifier, subpath: null };
+  return { pkgName: specifier.slice(0, slash), subpath: specifier.slice(slash + 1) };
+}
+
+function findPackageRoot(pkgName: string, fromFile: string): string | null {
+  let dir = dirname(fromFile);
+  while (true) {
+    const candidate = resolve(dir, "node_modules", pkgName);
+    if (existsSync(resolve(candidate, "package.json"))) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+function resolveExports(
+  exports: unknown,
+  subpath: string | null,
+  pkgRoot: string,
+): string | null {
+  if (!exports || typeof exports !== "object") return null;
+
+  const key = subpath === null ? "." : `./${subpath}`;
+  const entry = (exports as Record<string, unknown>)[key];
+  if (entry === undefined) return null;
+
+  const target = pickExportCondition(entry);
+  if (!target) return null;
+
+  return resolveFileOrIndex(resolve(pkgRoot, target));
+}
+
+function pickExportCondition(entry: unknown): string | null {
+  if (typeof entry === "string") return entry;
+  if (entry && typeof entry === "object") {
+    const obj = entry as Record<string, unknown>;
+    for (const key of ["import", "node", "default", "require", "types"]) {
+      const value = obj[key];
+      if (typeof value === "string") return value;
+      if (value && typeof value === "object") {
+        const nested = pickExportCondition(value);
+        if (nested) return nested;
+      }
+    }
+  }
   return null;
 }
 
