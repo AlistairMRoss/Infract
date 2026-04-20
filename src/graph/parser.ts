@@ -13,6 +13,16 @@ const SST_RESOURCE_TYPES: Record<string, SSTResourceType> = {
   "sst.Linkable": "Linkable",
 };
 
+interface FactoryDef {
+  resourceType: SSTResourceType;
+  nameArgIndex: number;
+  configArgIndex: number | null;
+  staticLinks: string[];
+  staticPermissions: Permission[];
+  staticHandler: string | null;
+  staticSpreadRefs: string[];
+}
+
 export function parseSSTProject(projectRoot: string): SSTProject {
   const configPath = findSSTConfig(projectRoot);
   if (!configPath) {
@@ -29,11 +39,16 @@ export function parseSSTProject(projectRoot: string): SSTProject {
 
   const configVars = new Map<string, { permissions: Permission[]; links: string[] }>();
   const arrayVars = new Map<string, string[]>();
+  const factories = new Map<string, FactoryDef>();
 
   const filesToParse = collectInfraFiles(configPath, projectRoot);
 
   for (const file of filesToParse) {
-    parseFile(file, project, configVars, arrayVars);
+    collectFactories(file, factories);
+  }
+
+  for (const file of filesToParse) {
+    parseFile(file, project, configVars, arrayVars, factories);
   }
 
   resolveArrayVars(arrayVars);
@@ -145,11 +160,154 @@ function resolveImportPath(
   return null;
 }
 
+function collectFactories(
+  filePath: string,
+  factories: Map<string, FactoryDef>,
+): void {
+  const source = safeReadFile(filePath);
+  if (!source) return;
+
+  const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.ESNext, true);
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))
+    ) {
+      const def = extractFactoryDef(node.initializer);
+      if (def) factories.set(node.name.text, def);
+    }
+
+    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
+      const def = extractFactoryDef(node);
+      if (def) factories.set(node.name.text, def);
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  ts.forEachChild(sf, visit);
+}
+
+function extractFactoryDef(
+  fn: ts.ArrowFunction | ts.FunctionExpression | ts.FunctionDeclaration,
+): FactoryDef | null {
+  const paramNames: string[] = [];
+  let restParamName: string | null = null;
+  fn.parameters.forEach((p, i) => {
+    if (!ts.isIdentifier(p.name)) {
+      paramNames.push(`__param${i}__`);
+      return;
+    }
+    if (p.dotDotDotToken) restParamName = p.name.text;
+    paramNames.push(p.name.text);
+  });
+
+  let newExpr: ts.NewExpression | null = null;
+  const search = (node: ts.Node): void => {
+    if (newExpr) return;
+    if (ts.isNewExpression(node) && isSST(node.expression)) {
+      newExpr = node;
+      return;
+    }
+    ts.forEachChild(node, search);
+  };
+  if (fn.body) search(fn.body);
+  if (!newExpr) return null;
+
+  const newExpression: ts.NewExpression = newExpr;
+  const sstType = getSST(newExpression.expression);
+  const resourceType = sstType ? SST_RESOURCE_TYPES[sstType] : undefined;
+  if (!resourceType) return null;
+
+  const args = newExpression.arguments ?? ts.factory.createNodeArray();
+  if (args.length === 0) return null;
+
+  const nameArgIndex = resolveArgIndex(args[0], paramNames, restParamName);
+  if (nameArgIndex === null) return null;
+
+  let configArgIndex: number | null = null;
+  const staticLinks: string[] = [];
+  const staticPermissions: Permission[] = [];
+  let staticHandler: string | null = null;
+  const staticSpreadRefs: string[] = [];
+
+  const configArg = args[1];
+  if (configArg) {
+    const directIdx = resolveArgIndex(configArg, paramNames, restParamName);
+    if (directIdx !== null) {
+      configArgIndex = directIdx;
+    } else if (ts.isObjectLiteralExpression(configArg)) {
+      for (const prop of configArg.properties) {
+        if (ts.isSpreadAssignment(prop)) {
+          const spreadIdx = resolveArgIndex(prop.expression, paramNames, restParamName);
+          if (spreadIdx !== null) {
+            configArgIndex = spreadIdx;
+          } else if (ts.isIdentifier(prop.expression)) {
+            staticSpreadRefs.push(prop.expression.text);
+          }
+          continue;
+        }
+        if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name)) continue;
+
+        switch (prop.name.text) {
+          case "handler":
+            if (ts.isStringLiteral(prop.initializer)) {
+              staticHandler = prop.initializer.text;
+            }
+            break;
+          case "link":
+            staticLinks.push(...extractLinkNames(prop.initializer));
+            break;
+          case "permissions":
+            staticPermissions.push(...extractPermissions(prop.initializer));
+            break;
+        }
+      }
+    }
+  }
+
+  return {
+    resourceType,
+    nameArgIndex,
+    configArgIndex,
+    staticLinks,
+    staticPermissions,
+    staticHandler,
+    staticSpreadRefs,
+  };
+}
+
+function resolveArgIndex(
+  expr: ts.Expression,
+  paramNames: string[],
+  restParamName: string | null,
+): number | null {
+  if (ts.isIdentifier(expr)) {
+    const idx = paramNames.indexOf(expr.text);
+    return idx >= 0 ? idx : null;
+  }
+  if (
+    ts.isElementAccessExpression(expr) &&
+    ts.isIdentifier(expr.expression) &&
+    restParamName !== null &&
+    expr.expression.text === restParamName &&
+    expr.argumentExpression &&
+    ts.isNumericLiteral(expr.argumentExpression)
+  ) {
+    return Number(expr.argumentExpression.text);
+  }
+  return null;
+}
+
 function parseFile(
   filePath: string,
   project: SSTProject,
   configVars: Map<string, { permissions: Permission[]; links: string[] }>,
   arrayVars: Map<string, string[]>,
+  factories: Map<string, FactoryDef>,
 ): void {
   const source = safeReadFile(filePath);
   if (!source) return;
@@ -219,6 +377,50 @@ function parseFile(
       const varName = node.parent.name.text;
       const firstArg = node.arguments[0] as ts.StringLiteral;
       varToResource.set(varName, firstArg.text);
+    }
+
+    // Factory call site: createLambda('AdminApi', { handler: '...' })
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      factories.has(node.expression.text)
+    ) {
+      const def = factories.get(node.expression.text)!;
+      const nameArg = node.arguments[def.nameArgIndex];
+      if (nameArg && ts.isStringLiteral(nameArg)) {
+        const name = nameArg.text;
+        const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+
+        const resource: SSTResource = {
+          name,
+          type: def.resourceType,
+          handler: def.staticHandler,
+          links: [...def.staticLinks],
+          permissions: def.staticPermissions.map((p) => ({
+            actions: [...p.actions],
+            resources: [...p.resources],
+          })),
+          parentApi: null,
+          definedAt: { file: filePath, line: line + 1 },
+        };
+
+        if (def.staticSpreadRefs.length > 0) {
+          resource._spreadRefs = [...def.staticSpreadRefs];
+        }
+
+        if (def.configArgIndex !== null) {
+          const configArg = node.arguments[def.configArgIndex];
+          if (configArg && ts.isObjectLiteralExpression(configArg)) {
+            parseResourceConfig(configArg, resource, sf);
+          }
+        }
+
+        project.resources.set(name, resource);
+
+        if (ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name)) {
+          varToResource.set(node.parent.name.text, name);
+        }
+      }
     }
 
     if (
